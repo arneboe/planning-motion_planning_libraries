@@ -22,17 +22,18 @@ struct SplinePrimitivesConfig
     //resolution of the internal splines
     double splineGeometricResolution;
     //order if the internal splines
-    double splineOrder;
+    int splineOrder;
     
     bool generateForwardMotions;
     bool generateBackwardMotions;
     bool generateLateralMotions;
     bool generatePointTurnMotions;
+    bool assume_bidirectional; // true if forward and backward movement shall be considered symmetric
     
     SplinePrimitivesConfig() : gridSize(0.1), numAngles(16), numEndAngles(7),
                                destinationCircleRadius(20), cellSkipFactor(0.3), splineGeometricResolution(0.1),
                                splineOrder(4), generateForwardMotions(true),
                                generateBackwardMotions(true), generateLateralMotions(true),
-                               generatePointTurnMotions(true){}
+                               generatePointTurnMotions(true), assume_bidirectional(false) {}
 };
 }

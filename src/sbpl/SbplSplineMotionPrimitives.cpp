@@ -13,13 +13,31 @@ SbplSplineMotionPrimitives::SbplSplineMotionPrimitives(const SplinePrimitivesCon
 {
     validateConfig(config);
     
-    radPerDiscreteAngle = (M_PI*2.0) / config.numAngles;
+    radPerDiscreteAngle = ((config.assume_bidirectional ? 1.0 : 2.0) *M_PI) / config.numAngles;
     primitivesByAngle.resize(config.numAngles);
     generatePrimitives(config);
 }
 
 std::vector<Eigen::Vector2i> SbplSplineMotionPrimitives::generateDestinationCells(const SplinePrimitivesConfig& config) const
 {
+    const int R = config.destinationCircleRadius;
+    const int R2 = R*R;
+    std::cout << "generateDestinationCells for R = " << R << ":";
+    std::vector<Eigen::Vector2i> result;
+    for(int x=-R; x<=R; ++x)
+    {
+        for(int y=-R; y<=R; ++y)
+        {
+            if(x*x + y*y <= R*R && (x!=0 || y!=0))
+            {
+                result.emplace_back(x,y);
+                std::cout << " [" << result.back().transpose() << ']';
+            }
+        }
+    }
+    std::cout << '\n';
+    return result;
+
     //for cellSkipFactor < 1 the algorithm generates the same coordinates several times
     //therefore we put them in a set :-) This is simpler than writing a more complex algorithm
     std::set<std::pair<int, int>> coordinates; //use pair instead of Vector2i because operator< is implemented for pair
@@ -54,12 +72,6 @@ std::vector<Eigen::Vector2i> SbplSplineMotionPrimitives::generateDestinationCell
                 err += 1 - 2*x;
             }
         }
-    }
-    
-    std::vector<Eigen::Vector2i> result;
-    for(const auto& point : coordinates)
-    {
-        result.emplace_back(point.first, point.second);
     }
     return result;
 }
@@ -118,14 +130,8 @@ void SbplSplineMotionPrimitives::generatePrimitivesForAngle(const int startAngle
             else if(config.generateBackwardMotions &&
                     destRot.x() < - epsilon)
             {
-                //the robot is driving backwards. we calculate the spline as if the robot is
-                //rotated by 180° and change the start and end rotation afterwards.
-                const int oppositStartAngle = (startAngle + config.numAngles / 2) % config.numAngles;
-                const int oppositEndAngle = (endAngle + config.numAngles / 2) % config.numAngles;
-                SplinePrimitive prim = getPrimitive(oppositStartAngle, oppositEndAngle,
+                SplinePrimitive prim = getPrimitive(startAngle, endAngle,
                                                     dest, id, SplinePrimitive::SPLINE_MOVE_BACKWARD);
-                prim.startAngle = startAngle;
-                prim.endAngle = endAngle; 
                 prim.startAngleRad = startAngle * radPerDiscreteAngle;
                 prim.endAngleRad = endAngle * radPerDiscreteAngle;
                 primitivesByAngle[startAngle].push_back(prim);
@@ -191,12 +197,15 @@ SplinePrimitive SbplSplineMotionPrimitives::getPrimitive(const int startAngle,
                                                          const SplinePrimitive::Type& type) const
 {
     SplinePrimitive prim;
-    
-    const double radStartAngle = startAngle * radPerDiscreteAngle;
+    const bool backward = (type == SplinePrimitive::SPLINE_MOVE_BACKWARD);
+    const double radStartAngle = startAngle * radPerDiscreteAngle + (backward ? M_PI : 0.0);
     const base::Vector2d start(0, 0); 
     const base::Vector2d startDirection = start + Eigen::Rotation2D<double>(radStartAngle) * Eigen::Vector2d::UnitX();
     
-    const double radEndAngle = endAngle * radPerDiscreteAngle;
+    // if we move bidirectional, make sure that actual endAngle has less than 90 degrees difference to start angle
+    const int actual_endAngle = config.assume_bidirectional ? (startAngle + (endAngle - startAngle + config.numAngles/2) % config.numAngles - config.numAngles/2) : endAngle;
+
+    const double radEndAngle = actual_endAngle * radPerDiscreteAngle + (backward ? M_PI : 0.0);
     const base::Vector2d end(destination.cast<double>() * config.gridSize);
     const base::Vector2d endDirection = end + Eigen::Rotation2D<double>(radEndAngle) * Eigen::Vector2d::UnitX();
     
@@ -222,38 +231,22 @@ SplinePrimitive SbplSplineMotionPrimitives::getPrimitive(const int startAngle,
 std::vector<int> SbplSplineMotionPrimitives::generateEndAngles(const int startAngle, const SplinePrimitivesConfig& config) const
 {
     //otherwise the calculation below gets more complicated
-    assert(config.numAngles % 2 == 0);
+    assert(config.assume_bidirectional || config.numAngles % 2 == 0);
+//    const int actual_angles = (config.assume_bidirectional ? 2 : 1) * config.numAngles;
+    std::cout << "End angles for start angle = " << startAngle << ": ";
     
+    //the left/right distinction is necessary in case of an even number of end angles (FIXME which actually is supposed to be forbidden?)
+    const int numAnglesLeftSide = (config.numEndAngles - 1) / 2;
+    const int numAnglesRightSide = (config.numEndAngles - (config.numAngles % 2)) / 2;
     std::vector<int> result;
-    result.push_back(startAngle);
-    //the left/right distinction is necessary in case of an even number of end angles
-    int numAnglesLeftSide = (config.numEndAngles - 1) / 2;
-    int numAnglesRightSide = (config.numEndAngles - 1) / 2;
-    
-    if(config.numEndAngles % 2 == 0)
+
+    for(int angle = startAngle - numAnglesRightSide; angle <= startAngle + numAnglesLeftSide; ++angle)
     {
-        ++numAnglesRightSide;
+        result.push_back((angle+config.numAngles) % config.numAngles);
+        std::cout << result.back() << ", ";
     }
-    if(numAnglesLeftSide > 0)
-    {
-        const double leftStep = config.numAngles / 4.0 / numAnglesLeftSide;
-        const double rightStep = config.numAngles / 4.0 / numAnglesRightSide;
-        
-        int count = 0;
-        for(double angle = startAngle - leftStep; count < numAnglesLeftSide; ++count, angle -= leftStep)
-        {
-            //casting angle to int before adding config-numAngles is important to get symmetric results
-            //+ config.numAngles is done to avoid negative number modulo (which is implementation defined in c++03)
-            const int realAngle = int(std::ceil(angle) + config.numAngles) % config.numAngles;
-            result.push_back(realAngle);
-        }
-        count = 0;
-        for(double angle = startAngle + rightStep; count < numAnglesRightSide; ++count, angle += rightStep)
-        {
-            const int realAngle = int(std::ceil(angle) + config.numAngles) % config.numAngles;
-            result.push_back(realAngle);
-        }
-    }
+
+    std::cout << '\n';
     return result;
 }
 
@@ -287,7 +280,7 @@ void SbplSplineMotionPrimitives::validateConfig(const SplinePrimitivesConfig& co
     if(config.numAngles % 2 != 0)
         throw std::runtime_error("numAngles has to be even");
         
-    if(config.numEndAngles > config.numAngles / 2)
+    if(config.numEndAngles > config.numAngles / (config.assume_bidirectional ? 1 : 2))
         throw std::runtime_error("numEndAngles has to be <= numAngles / 2");
     
     if(config.splineGeometricResolution <= 0)
